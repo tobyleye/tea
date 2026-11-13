@@ -10,38 +10,44 @@ import (
 )
 
 type model struct {
-	width              int
-	height             int
-	paused             bool
-	currentTime        time.Time
-	stopwatchRunning   bool
-	stopwatchStartTime time.Time
-	stopwatchBuffer    time.Duration
-	stopwatchElapsed   time.Duration
+	width               int
+	height              int
+	paused              bool
+	currentTime         time.Time
+	stopwatchRunning    bool
+	stopwatchIntervalId int
+	stopwatchStartTime  time.Time
+	lastElapsed         time.Duration
+	stopwatchElapsed    time.Duration
 }
 
 type tickMsg time.Time
-type stopwatchMsg time.Time
+type stopwatchMsg struct {
+	id   int
+	time time.Time
+}
 
 func tick() tea.Cmd {
 	return tea.Every(time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
-func stopwatchTick() tea.Cmd {
+
+func stopwatchTick(id int) tea.Cmd {
 	return tea.Every(time.Millisecond*100, func(t time.Time) tea.Msg {
-		return stopwatchMsg(t)
+		return stopwatchMsg{time: t, id: id}
 	})
 }
 
 func humanizeDuration(d time.Duration) string {
-	totalSeconds := int(d.Seconds())
-	secs := totalSeconds % 60
-	mins := totalSeconds / 60 % 60
-	hrs := totalSeconds / 60 / 60
-	pt := d.Seconds() - float64(totalSeconds)
-	floatSecs := float64(secs) + pt
-	return fmt.Sprintf("%02d:%02d:%04.1f", hrs, mins, floatSecs)
+	d = d.Truncate(100 * time.Millisecond)
+
+	hrs := d / time.Hour
+	mins := (d % time.Hour) / time.Minute
+	secs := (d % time.Minute).Seconds()
+
+	return fmt.Sprintf("%02d:%02d:%04.1f", hrs, mins, secs)
+
 }
 
 func (m model) Init() tea.Cmd {
@@ -58,26 +64,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		msgStr := msg.String()
 		switch msgStr {
+		case "q":
+			return m, tea.Quit
 		case "ctrl+c":
 			return m, tea.Quit
 		case "s":
-			stopped := m.stopwatchRunning == true
+			m.stopwatchRunning = !m.stopwatchRunning
 
-			if stopped {
+			if !m.stopwatchRunning {
 				// stopwatch stopped
-				m.stopwatchBuffer += time.Since(m.stopwatchStartTime)
-				m.stopwatchRunning = false
+				m.lastElapsed += time.Since(m.stopwatchStartTime)
+				m.stopwatchElapsed = m.lastElapsed
 
 				return m, nil
 			} else {
 				// stopwatch started
+				// new run → new id; ticks still pending from older runs
+				// will no longer match and get dropped
 				m.stopwatchStartTime = time.Now()
-				m.stopwatchRunning = true
-				return m, stopwatchTick()
+				m.stopwatchIntervalId++
+				return m, stopwatchTick(m.stopwatchIntervalId)
 			}
 		case "r":
 			now := time.Now()
-			m.stopwatchBuffer = time.Duration(0)
+			m.lastElapsed = time.Duration(0)
 			m.stopwatchElapsed = time.Duration(0) // reset stop watch buffer
 			m.stopwatchStartTime = now            // reset start time
 			return m, nil
@@ -98,11 +108,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tick()
 
 	case stopwatchMsg:
+
 		if !m.stopwatchRunning {
 			return m, nil
-		} else {
-			m.stopwatchElapsed = m.stopwatchBuffer + time.Since(m.stopwatchStartTime)
-			return m, stopwatchTick()
+		} else if m.stopwatchIntervalId == msg.id {
+			m.stopwatchElapsed = m.lastElapsed + time.Since(m.stopwatchStartTime)
+			// same run → keep the same id
+			return m, stopwatchTick(msg.id)
 		}
 	}
 
@@ -110,11 +122,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() tea.View {
-	style := lipgloss.NewStyle().
-		Width(m.width).
-		Height(m.height).
-		AlignHorizontal(lipgloss.Center)
-
 	v := m.currentTime.Format("15:04:05")
 	if m.paused {
 		v += " (paused)"
@@ -128,7 +135,7 @@ func (m model) View() tea.View {
 
 	v += "press s to start/stop the stopwatch, r to reset"
 
-	return tea.NewView(style.Render(v))
+	return tea.NewView(lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, v))
 }
 
 func main() {
